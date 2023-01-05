@@ -202,6 +202,8 @@ func (enc *pkEncryptor) EncryptZero(ct interface{}) {
 		} else {
 			enc.encryptZeroNoP(ct)
 		}
+	case *CiphertextQP:
+		enc.encryptZeroQP(*ct)
 	default:
 		panic(fmt.Sprintf("cannot Encrypt: input ciphertext type %s is not supported", reflect.TypeOf(ct)))
 	}
@@ -257,6 +259,50 @@ func (enc *pkEncryptor) encryptZero(ct *Ciphertext) {
 	if ct.IsNTT {
 		ringQP.RingQ.NTTLvl(levelQ, ct.Value[0], ct.Value[0])
 		ringQP.RingQ.NTTLvl(levelQ, ct.Value[1], ct.Value[1])
+	}
+}
+
+func (enc *pkEncryptor) encryptZeroQP(ct CiphertextQP) {
+	c0, c1 := ct.Value[0], ct.Value[1]
+
+	levelQ, levelP := c0.LevelQ(), c1.LevelP()
+	ringQP := enc.params.RingQP()
+
+	// ct = (e, 0)
+	enc.gaussianSampler.ReadLvl(levelQ, c0.Q)
+	if levelP != -1 {
+		ringQP.ExtendBasisSmallNormAndCenter(c0.Q, levelP, nil, c0.P)
+	}
+
+	ringQP.NTTLvl(levelQ, levelP, c0, c0)
+	// ct[1] is assumed to be sampled in of the Montgomery domain,
+	// thus -as will also be in the Montgomery domain (s is by default), therefore 'e'
+	// must be switched to the Montgomery domain.
+	ringQP.MFormLvl(levelQ, levelP, c0, c0)
+
+	// ct = (e, e)
+	enc.gaussianSampler.ReadLvl(levelQ, c1.Q)
+	if levelP != -1 {
+		ringQP.ExtendBasisSmallNormAndCenter(c1.Q, levelP, nil, c1.P)
+	}
+
+	ringQP.NTTLvl(levelQ, levelP, c1, c1)
+	ringQP.MFormLvl(levelQ, levelP, c1, c1)
+
+	u := ringQP.NewPoly()
+	enc.ternarySampler.ReadLvl(levelQ, u.Q)
+	ringQP.ExtendBasisSmallNormAndCenter(u.Q, levelP, nil, u.P)
+	ringQP.NTTLvl(levelQ, levelP, u, u)
+	ringQP.MFormLvl(levelQ, levelP, u, u)
+
+
+	// (u*p0 + e, u*p1 +e)
+	ringQP.MulCoeffsMontgomeryAndAddLvl(levelQ, levelP, u, enc.pk.Value[0], c0)
+	ringQP.MulCoeffsMontgomeryAndAddLvl(levelQ, levelP, u, enc.pk.Value[1], c1)
+
+	if !ct.IsNTT {
+		ringQP.InvNTTLvl(levelQ, levelP, c0, c0)
+		ringQP.InvNTTLvl(levelQ, levelP, c1, c1)
 	}
 }
 

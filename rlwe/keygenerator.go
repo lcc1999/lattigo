@@ -23,6 +23,8 @@ type KeyGenerator interface {
 	GenSwitchingKeyForRowRotation(sk *SecretKey) (swk *SwitchingKey)
 	GenRotationKeysForInnerSum(sk *SecretKey) (rks *RotationKeySet)
 	GenSwitchingKeysForRingSwap(skCKKS, skCI *SecretKey) (stdToci, ciToStd *SwitchingKey)
+
+	GenPubSwitchingKey(skInput *SecretKey, pkOutput *PublicKey) (newevakey *SwitchingKey)
 }
 
 // KeyGenerator is a structure that stores the elements required to create new keys,
@@ -316,6 +318,74 @@ func (keygen *keyGenerator) genSwitchingKey(skIn *ring.Poly, skOut *SecretKey, s
 		}
 	}
 
+	// Adds the plaintext (input-key) to the switching-key.
+	AddPolyTimesGadgetVectorToGadgetCiphertext(skIn, []GadgetCiphertext{swk.GadgetCiphertext}, *keygen.params.RingQP(), keygen.params.Pow2Base(), keygen.buffQ[0])
+}
+
+
+func (keygen *keyGenerator) GenPubSwitchingKey(skInput *SecretKey, pkOutput *PublicKey) (swk *SwitchingKey) {
+
+	levelP := utils.MinInt(pkOutput.LevelP(), keygen.params.PCount()-1)
+
+	// Allocates the switching-key.
+	swk = NewSwitchingKey(keygen.params, pkOutput.Value[0].Q.Level(), levelP)
+
+	// Maps the smaller key to the largest dimension with Y = X^{N/n}.
+	ring.MapSmallDimensionToLargerDimensionNTT(skInput.Value.Q, keygen.buffQ[0])
+
+	// Extends the modulus of the input key to the one of the output key
+	// if the former is smaller.
+	if skInput.Value.Q.Level() < pkOutput.Value[0].Q.Level() {
+
+		ringQ := keygen.params.RingQ()
+
+		// Switches out of the NTT and Montgomery domain.
+		ringQ.InvNTTLvl(0, keygen.buffQ[0], keygen.buffQP.Q)
+		ringQ.InvMFormLvl(0, keygen.buffQP.Q, keygen.buffQP.Q)
+
+		// Extends the RNS basis of the small norm polynomial.
+		Q := ringQ.Modulus[0]
+		QHalf := Q >> 1
+
+		polQ := keygen.buffQP.Q
+		polP := keygen.buffQ[0]
+		var sign uint64
+		for j := 0; j < ringQ.N; j++ {
+
+			coeff := polQ.Coeffs[0][j]
+
+			sign = 1
+			if coeff > QHalf {
+				coeff = Q - coeff
+				sign = 0
+			}
+
+			for i := skInput.LevelQ() + 1; i < pkOutput.LevelQ()+1; i++ {
+				polP.Coeffs[i][j] = (coeff * sign) | (ringQ.Modulus[i]-coeff)*(sign^1)
+			}
+		}
+
+		// Switches back to the NTT and Montgomery domain.
+		for i := skInput.Value.Q.Level() + 1; i < pkOutput.Value[0].Q.Level()+1; i++ {
+			ringQ.NTTSingle(i, polP.Coeffs[i], polP.Coeffs[i])
+			ring.MFormVec(polP.Coeffs[i], polP.Coeffs[i], ringQ.Modulus[i], ringQ.BredParams[i])
+		}
+	}
+
+	keygen.genPubSwitchingKey(keygen.buffQ[0], pkOutput, swk)
+
+	return
+}
+
+func (keygen *keyGenerator) genPubSwitchingKey(skIn *ring.Poly, pkOut *PublicKey, swk *SwitchingKey) {
+	enc := NewEncryptor(keygen.params, pkOut)
+	//enc := keygen.WithKey(pkOut)
+	// Samples an encryption of zero for each element of the switching-key.
+	for i := 0; i < len(swk.Value); i++ {
+		for j := 0; j < len(swk.Value[0]); j++ {
+			enc.EncryptZero(&swk.Value[i][j])
+		}
+	}
 	// Adds the plaintext (input-key) to the switching-key.
 	AddPolyTimesGadgetVectorToGadgetCiphertext(skIn, []GadgetCiphertext{swk.GadgetCiphertext}, *keygen.params.RingQP(), keygen.params.Pow2Base(), keygen.buffQ[0])
 }
